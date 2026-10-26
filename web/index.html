@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AI Daily Brief</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="AI Brief">
+<meta name="theme-color" content="#0f3d2e">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<style>
+  :root {
+    --bg: #0f3d2e; --bg2: #164d3a; --line: #2a6a52;
+    --text: #f3f1e8; --muted: #b9c9bf; --yellow: #f5c518; --yellow-dark: #3a2f00;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    min-height: 100dvh; padding: calc(env(safe-area-inset-top) + 24px) 20px
+      calc(env(safe-area-inset-bottom) + 32px);
+    max-width: 560px; margin: 0 auto; -webkit-tap-highlight-color: transparent;
+  }
+  header { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
+  .logo { width: 34px; height: 34px; border-radius: 9px; background: var(--yellow);
+    display: grid; place-items: center; color: var(--yellow-dark); font-weight: 800; font-size: 15px; }
+  header h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+  header small { display: block; color: var(--muted); font-size: 13px; font-weight: 400; }
+
+  .card { background: var(--bg2); border: 1px solid var(--line); border-radius: 22px; padding: 24px; }
+  .date { color: var(--yellow); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; }
+  .title { font-size: 24px; font-weight: 700; line-height: 1.25; margin: 6px 0 22px; }
+
+  .player { display: flex; align-items: center; gap: 18px; }
+  .play { width: 72px; height: 72px; flex: none; border: 0; border-radius: 50%; cursor: pointer;
+    background: var(--yellow); color: var(--yellow-dark); display: grid; place-items: center;
+    transition: transform .15s ease; position: relative; }
+  .play:active { transform: scale(.94); }
+  .play svg { width: 30px; height: 30px; }
+  .play::after { content: ""; position: absolute; inset: -6px; border-radius: 50%;
+    border: 2px solid var(--yellow); opacity: 0; }
+  .playing .play::after { animation: ring 1.8s ease-out infinite; }
+  @keyframes ring { from { transform: scale(.9); opacity: .7 } to { transform: scale(1.25); opacity: 0 } }
+
+  .bars { display: flex; align-items: flex-end; gap: 4px; height: 40px; flex: 1; }
+  .bars i { flex: 1; background: var(--yellow); border-radius: 3px; height: 18%; opacity: .45;
+    transition: height .3s ease, opacity .3s ease; }
+  .playing .bars i { opacity: 1; animation: eq 1s ease-in-out infinite alternate; }
+  .playing .bars i:nth-child(2n) { animation-duration: .8s }
+  .playing .bars i:nth-child(3n) { animation-duration: 1.2s }
+  .playing .bars i:nth-child(5n) { animation-duration: .65s }
+  @keyframes eq { from { height: 15% } to { height: 100% } }
+
+  .progress { margin-top: 20px; }
+  input[type=range] { width: 100%; accent-color: var(--yellow); }
+  .times { display: flex; justify-content: space-between; color: var(--muted); font-size: 13px;
+    font-variant-numeric: tabular-nums; }
+  .speed { background: none; border: 1px solid var(--line); color: var(--text); border-radius: 999px;
+    padding: 2px 10px; font: inherit; font-size: 13px; cursor: pointer; }
+
+  h2 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em;
+    font-weight: 600; margin: 32px 0 10px; }
+  ol.stories { padding-left: 20px; }
+  ol.stories li { margin: 8px 0; }
+  a { color: var(--text); text-decoration-color: var(--yellow); text-underline-offset: 3px; }
+
+  ul.archive { list-style: none; padding: 0; }
+  ul.archive button { width: 100%; text-align: left; background: none; border: 0;
+    border-bottom: 1px solid var(--line); color: var(--text); font: inherit; padding: 14px 2px;
+    display: flex; justify-content: space-between; cursor: pointer; }
+  ul.archive button[aria-current=true] { color: var(--yellow); }
+  ul.archive span { color: var(--muted); }
+  .empty { color: var(--muted); text-align: center; padding: 60px 0; }
+  @media (prefers-reduced-motion: reduce) { .playing .bars i, .playing .play::after { animation: none } }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">AI</div>
+  <h1>AI Daily Brief<small>Five minutes, every morning at eight</small></h1>
+</header>
+
+<main id="app"><p class="empty">Loading…</p></main>
+
+<audio id="audio" preload="metadata"></audio>
+
+<script>
+const app = document.getElementById("app");
+const audio = document.getElementById("audio");
+const ICON_PLAY = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>';
+const ICON_PAUSE = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>';
+const SPEEDS = [1, 1.25, 1.5, 0.75];
+let episodes = [], current = null, speedIdx = 0;
+
+const fmt = s => isFinite(s) ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}` : "–:––";
+const niceDate = d => new Date(d + "T12:00:00").toLocaleDateString("en-GB",
+  { weekday: "long", day: "numeric", month: "long" });
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function savePos() {
+  try { if (current) localStorage.setItem("pos:" + current.date, audio.currentTime); } catch {}
+}
+function loadPos(date) {
+  try { return parseFloat(localStorage.getItem("pos:" + date)) || 0; } catch { return 0; }
+}
+
+function render() {
+  if (!current) { app.innerHTML = '<p class="empty">No episode yet. The first one arrives tomorrow morning.</p>'; return; }
+  const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Amsterdam" });
+  app.innerHTML = `
+    <section class="card" id="card">
+      <div class="date">${current.date === today ? "Today" : current === episodes[0] ? "Latest" : "From the archive"}</div>
+      <div class="title">${esc(niceDate(current.date))}</div>
+      <div class="player">
+        <button class="play" id="play" aria-label="Play">${ICON_PLAY}</button>
+        <div class="bars" aria-hidden="true">${"<i></i>".repeat(14)}</div>
+      </div>
+      <div class="progress">
+        <input type="range" id="seek" min="0" max="100" step="0.1" value="0" aria-label="Position">
+        <div class="times"><span id="cur">0:00</span>
+          <button class="speed" id="speed">${SPEEDS[speedIdx]}×</button>
+          <span id="dur">–:––</span></div>
+      </div>
+    </section>
+    ${current.stories?.length ? `<h2>In this episode</h2><ol class="stories">${current.stories.map(s =>
+      `<li>${s.link ? `<a href="${esc(s.link)}" target="_blank" rel="noopener">${esc(s.title)}</a>` : esc(s.title)}</li>`
+    ).join("")}</ol>` : ""}
+    ${episodes.length > 1 ? `<h2>Earlier episodes</h2><ul class="archive">${episodes.map(e =>
+      `<li><button data-date="${e.date}" aria-current="${e === current}">${esc(niceDate(e.date))}<span>${e === current ? "Now" : "Play"}</span></button></li>`
+    ).join("")}</ul>` : ""}`;
+
+  document.getElementById("play").onclick = () => audio.paused ? audio.play() : audio.pause();
+  document.getElementById("speed").onclick = e => {
+    speedIdx = (speedIdx + 1) % SPEEDS.length;
+    audio.playbackRate = SPEEDS[speedIdx];
+    e.target.textContent = SPEEDS[speedIdx] + "×";
+  };
+  document.getElementById("seek").oninput = e => {
+    if (audio.duration) audio.currentTime = e.target.value / 100 * audio.duration;
+  };
+  app.querySelectorAll(".archive button").forEach(b =>
+    b.onclick = () => { select(episodes.find(e => e.date === b.dataset.date)); audio.play(); });
+  updateUI();
+}
+
+function select(ep) {
+  savePos();
+  current = ep;
+  audio.src = ep.audio;
+  audio.playbackRate = SPEEDS[speedIdx];
+  const pos = loadPos(ep.date);
+  audio.addEventListener("loadedmetadata", () => { if (pos < audio.duration - 5) audio.currentTime = pos; }, { once: true });
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: niceDate(ep.date), artist: "AI Daily Brief", album: "AI Daily Brief",
+      artwork: [{ src: "icon-512.png", sizes: "512x512", type: "image/png" }],
+    });
+  }
+  render();
+}
+
+function updateUI() {
+  const card = document.getElementById("card");
+  if (!card) return;
+  card.classList.toggle("playing", !audio.paused);
+  const btn = document.getElementById("play");
+  btn.innerHTML = audio.paused ? ICON_PLAY : ICON_PAUSE;
+  btn.setAttribute("aria-label", audio.paused ? "Play" : "Pause");
+  document.getElementById("cur").textContent = fmt(audio.currentTime);
+  document.getElementById("dur").textContent = fmt(audio.duration);
+  if (audio.duration) document.getElementById("seek").value = audio.currentTime / audio.duration * 100;
+}
+
+["play", "pause", "timeupdate", "loadedmetadata", "ended"].forEach(ev => audio.addEventListener(ev, updateUI));
+audio.addEventListener("pause", savePos);
+audio.addEventListener("ended", () => { try { localStorage.removeItem("pos:" + current.date); } catch {} });
+setInterval(() => { if (!audio.paused) savePos(); }, 5000);
+
+if ("mediaSession" in navigator) {
+  navigator.mediaSession.setActionHandler("seekbackward", () => audio.currentTime -= 15);
+  navigator.mediaSession.setActionHandler("seekforward", () => audio.currentTime += 15);
+}
+
+async function load() {
+  try {
+    const r = await fetch("feed.json?t=" + Date.now(), { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    episodes = (await r.json()).episodes || [];
+  } catch { episodes = []; }
+  if (episodes.length && (!current || audio.paused) && episodes[0].date !== current?.date) select(episodes[0]);
+  else if (!current) render();
+}
+
+load();
+// Terug naar de app na een tijdje weg? Kijk of er een nieuwe aflevering is.
+document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+</script>
+</body>
+</html>

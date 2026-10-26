@@ -1,0 +1,66 @@
+name: AI Daily Brief
+
+on:
+  schedule:
+    # Cron draait in UTC. Twee tijden, zodat er zomer én winter een run om
+    # 7:30 Nederlandse tijd is; het script laat de verkeerde run overslaan.
+    - cron: "30 5 * * *"   # 6:30 winter / 7:30 zomer
+    - cron: "30 6 * * *"   # 7:30 winter / 8:30 zomer
+  workflow_dispatch:       # handmatig starten via het tabblad Actions
+    inputs:
+      force:
+        description: "Nu genereren (tijdcheck overslaan)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: daily-brief
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      published: ${{ steps.run.outputs.published }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Aflevering maken
+        id: run
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+          FORCE: ${{ inputs.force }}
+        run: python bulletin.py
+
+      - name: Site klaarzetten
+        if: steps.run.outputs.published == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publiceren op GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
