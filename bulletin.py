@@ -145,7 +145,7 @@ def write_script(items: list[dict], today: dt.date) -> dict:
     r = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
-            "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+            "x-api-key": os.environ["ANTHROPIC_API_KEY"].strip(),
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         },
@@ -176,7 +176,7 @@ def speak(script: str, path: Path, attempts: int = 3) -> None:
         r = requests.post(
             f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}",
             params={"output_format": "mp3_44100_128"},
-            headers={"xi-api-key": os.environ["ELEVENLABS_API_KEY"]},
+            headers={"xi-api-key": os.environ["ELEVENLABS_API_KEY"].strip()},
             json={"text": script, "model_id": TTS_MODEL},
             timeout=300,
         )
@@ -234,7 +234,7 @@ def main() -> int:
 
     # GitHub-cron rekent in UTC; de workflow start twee keer en alleen de run
     # die om 7:xx Nederlandse tijd valt, gaat door. Zo klopt het zomer én winter.
-    if not FORCE and now.hour != RUN_HOUR:
+    if not FORCE and now.hour < RUN_HOUR:
         log(f"het is {now:%H:%M} in Amsterdam; deze run slaat over")
         return 0
 
