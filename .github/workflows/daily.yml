@@ -2,10 +2,11 @@ name: AI Daily Brief
 
 on:
   schedule:
-    # Cron draait in UTC. Twee tijden, zodat er zomer én winter een run om
-    # 7:30 Nederlandse tijd is; het script laat de verkeerde run overslaan.
-    - cron: "30 5 * * *"   # 6:30 winter / 7:30 zomer
-    - cron: "30 6 * * *"   # 7:30 winter / 8:30 zomer
+    # Cron draait in UTC, en GitHub start geplande runs soms veel later dan
+    # gepland of slaat ze over. Daarom zes kansen per ochtend (niet op het hele
+    # uur, dan is het het drukst). Het script maakt de aflevering bij de eerste
+    # run na 6:00 Nederlandse tijd; de rest ziet dat die er al is en stopt.
+    - cron: "17,47 4-6 * * *"   # 5:17–7:47 winter / 6:17–8:47 zomer
   workflow_dispatch:       # handmatig starten via het tabblad Actions
     inputs:
       force:
@@ -24,14 +25,14 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # vaste versie: geen verrassingen bij de overstap naar Ubuntu 26
     timeout-minutes: 15
     outputs:
       published: ${{ steps.run.outputs.published }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -49,18 +50,18 @@ jobs:
 
       - name: Site klaarzetten
         if: steps.run.outputs.published == 'true'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
   deploy:
     needs: build
     if: needs.build.outputs.published == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # vaste versie: geen verrassingen bij de overstap naar Ubuntu 26
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Publiceren op GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
