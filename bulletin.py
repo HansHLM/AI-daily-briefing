@@ -35,7 +35,7 @@ TTS_MODEL = "eleven_v4"
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 SITE_URL = os.environ.get("SITE_URL", "").rstrip("/")
 FORCE = os.environ.get("FORCE", "").lower() == "true"
-RUN_HOUR = 7          # lokale uur waarin gegenereerd wordt → klaar vóór 8:00
+RUN_HOUR = 6          # vanaf dit lokale uur mag er gegenereerd worden
 KEEP_EPISODES = 7     # zoveel afleveringen blijven online
 MIN_CHARS, MAX_CHARS = 2500, 9500   # eleven_v4 accepteert max. 10.000 tekens
 
@@ -132,16 +132,52 @@ Rules:
 - You may use these audio tags sparingly: [short pause] between stories, [serious] before security or legal news.
 - Close with exactly: "That's your brief for today. Back tomorrow at eight."
 
-Respond with JSON only, no code fences:
-{"script": "<the full spoken text>", "stories": [{"title": "<short headline>", "link": "<url of the source item>"}]}"""
+Deliver the bulletin by calling the publish_bulletin tool."""
+
+# Gestructureerde uitvoer via een verplichte tool-aanroep: de API levert dan
+# altijd geldige JSON, ook als het script aanhalingstekens bevat.
+TOOL = {
+    "name": "publish_bulletin",
+    "description": "Publish today's AI Daily Brief.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "script": {"type": "string", "description": "The full spoken text."},
+            "stories": {
+                "type": "array",
+                "description": "The stories covered, in order.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Short headline."},
+                        "link": {"type": "string", "description": "URL of the source item."},
+                    },
+                    "required": ["title", "link"],
+                },
+            },
+        },
+        "required": ["script", "stories"],
+    },
+}
 
 
-def write_script(items: list[dict], today: dt.date) -> dict:
+def write_script(items: list[dict], today: dt.date, attempts: int = 2) -> dict:
     date_spoken = f"{today:%A}, {today:%B} {today.day}"
     news = "\n\n".join(
         f"[{i}] {it['source']}: {it['title']}\n{it['summary']}\nLink: {it['link']}"
         for i, it in enumerate(items, 1)
     )
+    for attempt in range(1, attempts + 1):
+        try:
+            return _write_script_once(news, date_spoken)
+        except Exception as e:
+            if attempt == attempts:
+                raise
+            log(f"script mislukt ({e}); poging {attempt + 1}/{attempts}")
+            time.sleep(10)
+
+
+def _write_script_once(news: str, date_spoken: str) -> dict:
     r = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -151,17 +187,23 @@ def write_script(items: list[dict], today: dt.date) -> dict:
         },
         json={
             "model": CLAUDE_MODEL,
-            "max_tokens": 4000,
+            "max_tokens": 8000,
             "system": SYSTEM.replace("{date_spoken}", date_spoken),
+            "tools": [TOOL],
+            "tool_choice": {"type": "tool", "name": TOOL["name"]},
             "messages": [{"role": "user",
                           "content": f"Today's news items (last 24 hours):\n\n{news}"}],
         },
         timeout=180,
     )
-    r.raise_for_status()
-    text = "".join(b.get("text", "") for b in r.json()["content"] if b["type"] == "text")
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
-    data = json.loads(text)
+    if not r.ok:
+        raise RuntimeError(f"Claude API {r.status_code}: {r.text[:300]}")
+    body = r.json()
+    if body.get("stop_reason") == "max_tokens":
+        raise RuntimeError("Claude stopte halverwege (max_tokens bereikt)")
+    data = next((b["input"] for b in body["content"] if b["type"] == "tool_use"), None)
+    if not data or not isinstance(data.get("script"), str):
+        raise RuntimeError("Claude leverde geen bruikbaar script")
 
     script = data["script"].strip()
     if not MIN_CHARS <= len(script) <= MAX_CHARS:
@@ -232,8 +274,10 @@ def main() -> int:
     today = now.date()
     set_output("published", "false")
 
-    # GitHub-cron rekent in UTC; de workflow start twee keer en alleen de run
-    # die om 7:xx Nederlandse tijd valt, gaat door. Zo klopt het zomer én winter.
+    # GitHub-cron rekent in UTC en start meerdere keren per ochtend. Runs vóór
+    # 6:00 Nederlandse tijd slaan over; de eerste run daarna maakt de aflevering,
+    # latere runs zien dat die er al is. Zo klopt het zomer én winter, en vangt
+    # een volgende run het op als GitHub er een vertraagt of overslaat.
     if not FORCE and now.hour < RUN_HOUR:
         log(f"het is {now:%H:%M} in Amsterdam; deze run slaat over")
         return 0
