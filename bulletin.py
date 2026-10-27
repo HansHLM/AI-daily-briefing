@@ -132,32 +132,32 @@ Rules:
 - You may use these audio tags sparingly: [short pause] between stories, [serious] before security or legal news.
 - Close with exactly: "That's your brief for today. Back tomorrow at eight."
 
-Deliver the bulletin by calling the publish_bulletin tool."""
+Return the bulletin as JSON matching the given schema."""
 
-# Gestructureerde uitvoer via een verplichte tool-aanroep: de API levert dan
-# altijd geldige JSON, ook als het script aanhalingstekens bevat.
-TOOL = {
-    "name": "publish_bulletin",
-    "description": "Publish today's AI Daily Brief.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "script": {"type": "string", "description": "The full spoken text."},
-            "stories": {
-                "type": "array",
-                "description": "The stories covered, in order.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string", "description": "Short headline."},
-                        "link": {"type": "string", "description": "URL of the source item."},
-                    },
-                    "required": ["title", "link"],
+# Gestructureerde uitvoer (output_config.format): de API garandeert dat het
+# antwoord geldige JSON volgens dit schema is, ook als het script aanhalings-
+# tekens bevat. (Afgedwongen tool-aanroepen worden door dit model niet
+# ondersteund.)
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "script": {"type": "string", "description": "The full spoken text."},
+        "stories": {
+            "type": "array",
+            "description": "The stories covered, in order.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Short headline."},
+                    "link": {"type": "string", "description": "URL of the source item."},
                 },
+                "required": ["title", "link"],
+                "additionalProperties": False,
             },
         },
-        "required": ["script", "stories"],
     },
+    "required": ["script", "stories"],
+    "additionalProperties": False,
 }
 
 
@@ -171,7 +171,11 @@ def write_script(items: list[dict], today: dt.date, attempts: int = 2) -> dict:
         try:
             return _write_script_once(news, date_spoken)
         except Exception as e:
-            if attempt == attempts:
+            # Een fout in het verzoek zelf (4xx, behalve 429) wordt niet beter
+            # van opnieuw proberen.
+            m = re.match(r"Claude API (\d+)", str(e))
+            permanent = m and m.group(1).startswith("4") and m.group(1) != "429"
+            if attempt == attempts or permanent:
                 raise
             log(f"script mislukt ({e}); poging {attempt + 1}/{attempts}")
             time.sleep(10)
@@ -187,22 +191,30 @@ def _write_script_once(news: str, date_spoken: str) -> dict:
         },
         json={
             "model": CLAUDE_MODEL,
-            "max_tokens": 8000,
+            # Ruim, want het model denkt eerst na en dat telt mee. Te krap
+            # betekent een afgekapt antwoord.
+            "max_tokens": 16000,
             "system": SYSTEM.replace("{date_spoken}", date_spoken),
-            "tools": [TOOL],
-            "tool_choice": {"type": "tool", "name": TOOL["name"]},
+            "output_config": {"format": {"type": "json_schema", "schema": SCHEMA}},
             "messages": [{"role": "user",
                           "content": f"Today's news items (last 24 hours):\n\n{news}"}],
         },
-        timeout=180,
+        timeout=300,
     )
     if not r.ok:
         raise RuntimeError(f"Claude API {r.status_code}: {r.text[:300]}")
     body = r.json()
-    if body.get("stop_reason") == "max_tokens":
+    stop = body.get("stop_reason")
+    if stop == "max_tokens":
         raise RuntimeError("Claude stopte halverwege (max_tokens bereikt)")
-    data = next((b["input"] for b in body["content"] if b["type"] == "tool_use"), None)
-    if not data or not isinstance(data.get("script"), str):
+    if stop == "refusal":
+        raise RuntimeError("Claude weigerde het script te schrijven")
+    text = "".join(b.get("text", "") for b in body["content"] if b["type"] == "text")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"antwoord van Claude is geen geldige JSON ({e})")
+    if not isinstance(data.get("script"), str):
         raise RuntimeError("Claude leverde geen bruikbaar script")
 
     script = data["script"].strip()
