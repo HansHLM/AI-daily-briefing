@@ -73,6 +73,15 @@
   ul.archive button[aria-current=true] { color: var(--yellow); }
   ul.archive span { color: var(--muted); }
   .empty { color: var(--muted); text-align: center; padding: 60px 0; }
+  .notice { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 16px; padding: 12px 14px;
+    border: 1px solid var(--yellow); border-radius: 14px; background: rgba(245, 197, 24, .10);
+    font-size: 14px; line-height: 1.45; }
+  .notice svg { flex: none; width: 18px; height: 18px; margin-top: 1px; color: var(--yellow); }
+  .notice p { flex: 1; }
+  .notice button { flex: none; background: none; border: 0; color: var(--muted); font: inherit;
+    font-size: 13px; cursor: pointer; padding: 0 0 0 4px; text-decoration: underline; }
+  ul.archive li.lost div { display: flex; justify-content: space-between; padding: 14px 2px;
+    border-bottom: 1px solid var(--line); color: var(--muted); opacity: .6; }
   @media (prefers-reduced-motion: reduce) { .playing .bars i, .playing .play::after { animation: none } }
 </style>
 </head>
@@ -92,7 +101,7 @@ const audio = document.getElementById("audio");
 const ICON_PLAY = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>';
 const ICON_PAUSE = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>';
 const SPEEDS = [1, 1.25, 1.5, 0.75];
-let episodes = [], current = null, speedIdx = 0;
+let episodes = [], lost = [], current = null, speedIdx = 0;
 
 const fmt = s => isFinite(s) ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}` : "–:––";
 const niceDate = d => new Date(d + "T12:00:00").toLocaleDateString("en-GB",
@@ -106,10 +115,23 @@ function loadPos(date) {
   try { return parseFloat(localStorage.getItem("pos:" + date)) || 0; } catch { return 0; }
 }
 
+function dismissed(date) {
+  try { return localStorage.getItem("lost-seen:" + date) === "1"; } catch { return false; }
+}
+
+function noticesHTML() {
+  return lost.filter(l => !dismissed(l.date)).map(l => `
+    <div class="notice" role="status">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+      <p>The episode of <strong>${esc(niceDate(l.date))}</strong> was lost: ${esc(l.reason || "download failed")}.</p>
+      <button data-dismiss="${esc(l.date)}">Dismiss</button>
+    </div>`).join("");
+}
+
 function render() {
-  if (!current) { app.innerHTML = '<p class="empty">No episode yet. The first one arrives tomorrow morning.</p>'; return; }
+  if (!current) { app.innerHTML = noticesHTML() + '<p class="empty">No episode yet. The first one arrives tomorrow morning.</p>'; bindNotices(); return; }
   const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Amsterdam" });
-  app.innerHTML = `
+  app.innerHTML = noticesHTML() + `
     <section class="card" id="card">
       <div class="date">${current.date === today ? "Today" : current === episodes[0] ? "Latest" : "From the archive"}</div>
       <div class="title">${esc(niceDate(current.date))}</div>
@@ -127,9 +149,13 @@ function render() {
     ${current.stories?.length ? `<h2>In this episode</h2><ol class="stories">${current.stories.map(s =>
       `<li>${s.link ? `<a href="${esc(s.link)}" target="_blank" rel="noopener">${esc(s.title)}</a>` : esc(s.title)}</li>`
     ).join("")}</ol>` : ""}
-    ${episodes.length > 1 ? `<h2>Earlier episodes</h2><ul class="archive">${episodes.map(e =>
-      `<li><button data-date="${e.date}" aria-current="${e === current}">${esc(niceDate(e.date))}<span>${e === current ? "Now" : "Play"}</span></button></li>`
-    ).join("")}</ul>` : ""}`;
+    ${episodes.length + lost.length > 1 ? `<h2>Earlier episodes</h2><ul class="archive">${
+      [...episodes.map(e => ({ ...e, isLost: false })), ...lost.map(l => ({ ...l, isLost: true }))]
+        .sort((a, b) => b.date.localeCompare(a.date))
+        .map(e => e.isLost
+          ? `<li class="lost"><div>${esc(niceDate(e.date))}<span>Unavailable</span></div></li>`
+          : `<li><button data-date="${e.date}" aria-current="${e === current || e.date === current.date}">${esc(niceDate(e.date))}<span>${e.date === current.date ? "Now" : "Play"}</span></button></li>`)
+        .join("")}</ul>` : ""}`;
 
   document.getElementById("play").onclick = () => audio.paused ? audio.play() : audio.pause();
   document.getElementById("speed").onclick = e => {
@@ -140,9 +166,17 @@ function render() {
   document.getElementById("seek").oninput = e => {
     if (audio.duration) audio.currentTime = e.target.value / 100 * audio.duration;
   };
+  bindNotices();
   app.querySelectorAll(".archive button").forEach(b =>
     b.onclick = () => { select(episodes.find(e => e.date === b.dataset.date)); audio.play(); });
   updateUI();
+}
+
+function bindNotices() {
+  app.querySelectorAll("[data-dismiss]").forEach(b => b.onclick = () => {
+    try { localStorage.setItem("lost-seen:" + b.dataset.dismiss, "1"); } catch {}
+    b.closest(".notice").remove();
+  });
 }
 
 function select(ep) {
@@ -187,10 +221,12 @@ async function load() {
   try {
     const r = await fetch("feed.json?t=" + Date.now(), { cache: "no-store" });
     if (!r.ok) throw new Error(r.status);
-    episodes = (await r.json()).episodes || [];
-  } catch { episodes = []; }
+    const feed = await r.json();
+    episodes = feed.episodes || [];
+    lost = feed.lost || [];
+  } catch { episodes = []; lost = []; }
   if (episodes.length && (!current || audio.paused) && episodes[0].date !== current?.date) select(episodes[0]);
-  else if (!current) render();
+  else render();
 }
 
 load();
