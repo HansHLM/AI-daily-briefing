@@ -2,7 +2,7 @@
 """
 AI Daily Brief — dagelijkse pijplijn.
 
-  1. Nieuws ophalen   (RSS-feeds, laatste 24 uur)
+  1. Nieuws ophalen   (RSS-feeds, laatste 24 uur; zo nodig 48 of 72 uur)
   2. Script schrijven (Claude API)
   3. Inspreken        (ElevenLabs, stem Lola, eleven_v4)
   4. Publiceren       (map site/ → GitHub Pages: mp3 + feed.json + speler)
@@ -47,10 +47,17 @@ WEB = ROOT / "web"
 FEEDS = [
     "https://techcrunch.com/category/artificial-intelligence/feed/",
     "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
-    "https://venturebeat.com/category/ai/feed/",
     "https://arstechnica.com/ai/feed/",
     "https://www.technologyreview.com/topic/artificial-intelligence/feed",
+    "https://www.theguardian.com/technology/artificialintelligenceai/rss",
+    "https://www.theregister.com/software/ai_ml/headlines.atom",
 ]
+# VentureBeat is verwijderd: die weigerde GitHub elke ochtend (429).
+
+# Hoeveel berichten het script minimaal wil hebben, en hoe ver het daarvoor
+# terug mag kijken. Na een stil weekend is 24 uur vaak te weinig.
+MIN_ITEMS = 8
+WINDOWS_HOURS = (24, 48, 72)
 
 UA = {"User-Agent": "AI-Daily-Brief/1.0 (+github actions)"}
 
@@ -85,8 +92,12 @@ def load_feed() -> list[dict]:
 
 
 # ── 1. Nieuws ophalen ───────────────────────────────────────────────────────
-def fetch_news(hours: int = 24, limit: int = 40) -> list[dict]:
-    cutoff = time.time() - hours * 3600
+def fetch_news(exclude_links: set[str] = frozenset(), limit: int = 40) -> list[dict]:
+    """Haalt AI-nieuws op. Begint met de laatste 24 uur en kijkt verder terug
+    (48, dan 72 uur) zolang er minder dan MIN_ITEMS berichten zijn. Berichten
+    die al in een recente aflevering zaten, worden overgeslagen."""
+    now = time.time()
+    oldest = now - max(WINDOWS_HOURS) * 3600
     items, seen = [], set()
     for url in FEEDS:
         try:
@@ -104,17 +115,24 @@ def fetch_news(hours: int = 24, limit: int = 40) -> list[dict]:
                 continue
             ts = calendar.timegm(t)  # feedparser levert UTC
             title = (entry.get("title") or "").strip()
-            if ts < cutoff or not title or title.lower() in seen:
+            link = entry.get("link", "")
+            if ts < oldest or not title or title.lower() in seen or link in exclude_links:
                 continue
             seen.add(title.lower())
             summary = re.sub(r"<[^>]+>", " ", entry.get("summary", ""))
             summary = re.sub(r"\s+", " ", summary).strip()[:500]
             items.append({"source": source, "title": title, "summary": summary,
-                          "link": entry.get("link", ""), "ts": ts})
+                          "link": link, "ts": ts})
             n += 1
-        log(f"{n:>2} berichten uit {source}")
+        log(f"{n:>2} berichten uit {source} (laatste {max(WINDOWS_HOURS)} uur)")
     items.sort(key=lambda x: x["ts"], reverse=True)
-    return items[:limit]
+
+    for hours in WINDOWS_HOURS:
+        chosen = [it for it in items if it["ts"] >= now - hours * 3600]
+        if len(chosen) >= MIN_ITEMS:
+            break
+    log(f"{len(chosen)} nieuwe berichten uit de laatste {hours} uur gebruikt")
+    return chosen[:limit]
 
 
 # ── 2. Script schrijven ─────────────────────────────────────────────────────
@@ -197,7 +215,7 @@ def _write_script_once(news: str, date_spoken: str) -> dict:
             "system": SYSTEM.replace("{date_spoken}", date_spoken),
             "output_config": {"format": {"type": "json_schema", "schema": SCHEMA}},
             "messages": [{"role": "user",
-                          "content": f"Today's news items (last 24 hours):\n\n{news}"}],
+                          "content": f"Recent news items (newest first; prefer the most recent):\n\n{news}"}],
         },
         timeout=300,
     )
@@ -299,8 +317,9 @@ def main() -> int:
         log("aflevering van vandaag staat al online; klaar")
         return 0
 
-    items = fetch_news()
-    log(f"{len(items)} nieuwsberichten verzameld")
+    # Verhalen uit de laatste twee afleveringen niet opnieuw brengen.
+    recent = {st.get("link") for ep in episodes[:2] for st in ep.get("stories", [])}
+    items = fetch_news(exclude_links={l for l in recent if l})
     if len(items) < 3:
         raise RuntimeError("te weinig nieuws gevonden; controleer de feeds")
 
