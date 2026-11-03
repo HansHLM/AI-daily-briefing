@@ -75,20 +75,21 @@ def set_output(name: str, value: str) -> None:
 
 
 # ── 0. Bestaande site ophalen ───────────────────────────────────────────────
-def load_feed() -> list[dict]:
-    """Leest de huidige feed.json van de live site (leeg bij eerste run)."""
+def load_feed() -> dict:
+    """Leest de huidige feed.json van de live site ({} bij de eerste run).
+    Kan hij niet gelezen worden, dan stopt de run liever dan dat hij een site
+    zonder oude afleveringen publiceert; een latere run probeert het opnieuw."""
     if not SITE_URL:
-        return []
+        return {}
     try:
-        r = requests.get(f"{SITE_URL}/feed.json", params={"t": int(time.time())},
-                         headers=UA, timeout=20)
-        if r.status_code == 404:
-            return []
-        r.raise_for_status()
-        return r.json().get("episodes", [])
-    except Exception as e:
-        log(f"bestaande feed niet gelezen ({e}); begin met lege feed")
-        return []
+        data = download(f"{SITE_URL}/feed.json?t={int(time.time())}")
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return {}
+        raise RuntimeError(f"bestaande feed.json niet leesbaar ({e})")
+    except requests.RequestException as e:
+        raise RuntimeError(f"bestaande feed.json niet leesbaar ({e})")
+    return json.loads(data)
 
 
 # ── 1. Nieuws ophalen ───────────────────────────────────────────────────────
@@ -267,11 +268,50 @@ def speak(script: str, path: Path, attempts: int = 3) -> None:
 
 
 # ── 4. Publiceren ───────────────────────────────────────────────────────────
-def build_site(episodes: list[dict], new: dict, new_audio: Path) -> None:
-    """Bouwt site/: speler + feed.json + de laatste KEEP_EPISODES mp3's."""
+def download(url: str, attempts: int = 4) -> bytes:
+    """Downloadt een bestand van de live site. Tijdelijke fouten (503, time-out,
+    afgebroken verbinding) komen bij GitHub Pages af en toe voor; daarom een
+    paar pogingen met een oplopende pauze. Een 404 is definitief."""
+    for attempt in range(1, attempts + 1):
+        try:
+            r = requests.get(url, headers=UA, timeout=120)
+            r.raise_for_status()
+            return r.content
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                raise
+            err = e
+        except requests.RequestException as e:
+            err = e
+        if attempt < attempts:
+            wait = 5 * 2 ** (attempt - 1)   # 5, 10, 20 seconden
+            log(f"download mislukt ({err}); poging {attempt + 1}/{attempts} over {wait} s")
+            time.sleep(wait)
+    raise err
+LOST_NOTICE_DAYS = 7   # zo lang blijft een melding over een verloren aflevering staan
+
+
+def short_reason(e: Exception) -> str:
+    """Korte, leesbare reden voor de melding in de speler."""
+    code = getattr(getattr(e, "response", None), "status_code", None)
+    if code == 503:
+        return "temporary server error (503)"
+    if code:
+        return f"server error ({code})"
+    if isinstance(e, requests.Timeout):
+        return "download timed out"
+    return "download failed"
+
+
+def build_site(episodes: list[dict], new: dict, new_audio: Path,
+               lost_before: list[dict]) -> None:
+    """Bouwt site/: speler + feed.json + de laatste KEEP_EPISODES mp3's.
+    Afleveringen die niet opnieuw gedownload konden worden, komen in de lijst
+    "lost", zodat de speler er een melding over kan tonen."""
     episodes = [e for e in episodes if e["date"] != new["date"]]
     episodes = [new] + episodes
     keep, drop = episodes[:KEEP_EPISODES], episodes[KEEP_EPISODES:]
+    today = dt.datetime.now(TZ).date()
 
     shutil.copytree(WEB, OUT, dirs_exist_ok=True)
     (OUT / "episodes").mkdir(parents=True, exist_ok=True)
@@ -279,21 +319,31 @@ def build_site(episodes: list[dict], new: dict, new_audio: Path) -> None:
 
     # Oudere afleveringen die blijven: opnieuw van de live site halen,
     # zodat de repo zelf nooit mp3's hoeft te bevatten.
+    lost_now = []
     for ep in keep[1:]:
         dest = OUT / ep["audio"]
         try:
-            r = requests.get(f"{SITE_URL}/{ep['audio']}", headers=UA, timeout=60)
-            r.raise_for_status()
-            dest.write_bytes(r.content)
+            dest.write_bytes(download(f"{SITE_URL}/{ep['audio']}"))
         except Exception as e:
             log(f"oude aflevering {ep['date']} niet meegenomen ({e})")
             keep.remove(ep)
+            lost_now.append({"date": ep["date"], "lost_on": today.isoformat(),
+                             "reason": short_reason(e)})
     if drop:
         log(f"{len(drop)} oude aflevering(en) offline gehaald")
 
+    # Eerdere meldingen bewaren zolang ze jonger zijn dan LOST_NOTICE_DAYS.
+    cutoff = (today - dt.timedelta(days=LOST_NOTICE_DAYS)).isoformat()
+    lost = lost_now + [l for l in lost_before
+                       if l.get("lost_on", "") >= cutoff
+                       and l["date"] not in {x["date"] for x in lost_now}]
+    if lost_now:
+        log(f"melding in de speler voor: {', '.join(l['date'] for l in lost_now)}")
+
     feed = {"title": "AI Daily Brief",
             "updated": dt.datetime.now(TZ).isoformat(timespec="seconds"),
-            "episodes": keep}
+            "episodes": keep,
+            "lost": lost}
     (OUT / "feed.json").write_text(json.dumps(feed, indent=2, ensure_ascii=False))
     log(f"site gebouwd: {len(keep)} aflevering(en) online")
 
@@ -312,7 +362,8 @@ def main() -> int:
         log(f"het is {now:%H:%M} in Amsterdam; deze run slaat over")
         return 0
 
-    episodes = load_feed()
+    current = load_feed()
+    episodes = current.get("episodes", [])
     if not FORCE and any(e["date"] == today.isoformat() for e in episodes):
         log("aflevering van vandaag staat al online; klaar")
         return 0
@@ -335,7 +386,7 @@ def main() -> int:
         "stories": result["stories"],
         "script": result["script"],
     }
-    build_site(episodes, new, tmp)
+    build_site(episodes, new, tmp, current.get("lost", []))
     set_output("published", "true")
     log("klaar ✓")
     return 0
